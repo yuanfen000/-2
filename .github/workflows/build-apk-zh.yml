@@ -29,22 +29,53 @@ jobs:
           flutter-version: '3.47.9'
           cache: true
 
-      - name: 安装 Android NDK
+      - name: 安装 Android NDK 与 CMake
         run: |
           SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-35" > /dev/null
         continue-on-error: true
 
+      # NDK 自带的 glslc 太旧，编不了 llama.cpp 的 cooperative-matrix 着色器。
+      # 插件 CMake 只在 /usr/local/bin、VULKAN_SDK/bin 里找新版 glslc，所以必须软链过去。
+      - name: 准备 glslc 并探测 Vulkan 着色器能力
+        id: glslc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq glslc > /dev/null
+          sudo ln -sf /usr/bin/glslc /usr/local/bin/glslc
+          glslc --version || true
+          TEST=local_plugins/llama_flutter_android/android/src/main/cpp/llama.cpp/ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/coopmat.comp
+          if glslc --target-env=vulkan1.2 -fshader-stage=compute -o /dev/null "$TEST" 2>/tmp/glslc.err; then
+            echo "coopmat 支持：保留 Vulkan 后端"
+            echo "no_vulkan=" >> "$GITHUB_OUTPUT"
+          else
+            echo "coopmat 不支持，构建时关掉 Vulkan 后端（纯 CPU）"
+            head -5 /tmp/glslc.err || true
+            echo "no_vulkan=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 拉依赖
         run: flutter pub get
 
-      - name: 编译 APK（debug 签名，仅自用）
+      - name: 编译 APK（Vulkan 后端）
+        if: steps.glslc.outputs.no_vulkan != 'true'
         env:
           PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING: 'true'
         run: flutter build apk --release --split-per-abi
 
+      - name: 编译 APK（Vulkan 失败 → 关掉 Vulkan 重试）
+        if: failure()
+        env:
+          PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING: 'true'
+          LLAMA_NO_VULKAN: 'true'
+        run: |
+          flutter clean
+          flutter pub get
+          flutter build apk --release --split-per-abi
+
       - name: 上传产物
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: privatelm-zh-cn-apk

@@ -77,6 +77,12 @@ android {
                     "-DGGML_CPU_AARCH64=ON",
                     "-DGGML_OPENMP=OFF"
                 )
+
+                // 构建机的 glslc 太旧（编不了 cooperative matrix 着色器）时，
+                // 用 LLAMA_NO_VULKAN=true 关掉 Vulkan 后端，退回纯 CPU 构建。
+                if (System.getenv("LLAMA_NO_VULKAN") == "true") {
+                    arguments += "-DLLAMA_ANDROID_VULKAN=OFF"
+                }
             }
         }
     }
